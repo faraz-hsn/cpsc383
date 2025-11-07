@@ -92,16 +92,32 @@ def estimate_path_cost(start, path):
         i = i + 1
     return total
 
+def estimate_next_step_cost(cur_loc, direction):
+    try:
+        nxt = cur_loc.add(direction)
+        if not on_map(nxt):
+            return None
+        cell = get_cell_info_at(nxt)
+        mv = 1
+        try:
+            mv2 = int(cell.move_cost)
+            if mv2 > 0:
+                mv = mv2
+        except:
+            mv = 1
+        return mv
+    except:
+        return None
+
 def tiny_split_bias(agent_id, sx, sy):
     try:
         h = (agent_id * 73856093) ^ (sx * 19349663) ^ (sy * 83492791)
     except:
         h = (sx * 19349663) ^ (sy * 83492791)
     v = h % 1000
-    return float(v) / 2000.0  # [0..0.4995], only breaks first-tick ties
+    return float(v) / 2000.0  # [0..0.4995]
 
 def required_agents_for_xy(sx, sy):
-    # Try visible top layer first
     try:
         cell = get_cell_info_at(Location(sx, sy))
         top = cell.top_layer
@@ -112,11 +128,9 @@ def required_agents_for_xy(sx, sy):
                     return r
             except:
                 return 2
-        # survivor or empty on top -> 1
         return 1
     except:
         pass
-    # Try drone scan if exposed in this build
     try:
         layers = drone_scan(Location(sx, sy))
         i = 0
@@ -135,7 +149,6 @@ def required_agents_for_xy(sx, sy):
             i = i + 1
         return 1
     except:
-        # Conservative default (safer to over-allocate for rubble)
         return 2
 
 class AgentState:
@@ -148,10 +161,13 @@ class AgentState:
         self.known_saved = set()
         self.need_charging = False
         self.charging_now = False
-        # capacity-aware claims: (x,y) -> {"max":k, "taken": {agent_id:1}, "round": int}
-        self.claims_cap = {}
-        # help requests: (x,y) -> {"need":k_needed_remaining, "round":int}
-        self.help_open = {}
+        self.claims_cap = {}   # (x,y) -> {"max":k, "taken": {agent_id:1}, "round": int}
+        self.help_open = {}    # (x,y) -> {"need":k_remaining, "round":int}
+        # Energy tracking for logs
+        self.energy_init = None
+        self.energy_last = None
+        self.last_action = "spawn"
+        self.last_spend = 0
 
 STATE = AgentState()
 
@@ -199,7 +215,6 @@ def consume_help_slot(x, y):
             pass
 
 def clean_old(current_round, ttl):
-    # claims
     klist = list(STATE.claims_cap.keys())
     i = 0
     while i < len(klist):
@@ -211,7 +226,6 @@ def clean_old(current_round, ttl):
         except:
             pass
         i = i + 1
-    # help
     hlist = list(STATE.help_open.keys())
     j = 0
     while j < len(hlist):
@@ -225,14 +239,13 @@ def clean_old(current_round, ttl):
         j = j + 1
 
 def pick_best_target_and_path(loc, energy, survivors, round_num, agent_id):
-    # Build candidate list = survivors with free claim capacity + open HELP2 slots
     candidates = []
 
-    # 1) HELP slots first (so nearest free agent goes to assist waiting rubble)
+    # 1) Open HELP first (nearest free agent goes)
     hkeys = list(STATE.help_open.keys())
     j = 0
     while j < len(hkeys):
-        (hx, hy) = hkeys[j]
+        hx, hy = hkeys[j]
         entry = STATE.help_open[(hx, hy)]
         need = entry.get("need", 0)
         if need > 0:
@@ -240,13 +253,13 @@ def pick_best_target_and_path(loc, energy, survivors, round_num, agent_id):
             if path is not None:
                 base_cost = estimate_path_cost(loc, path)
                 bias = tiny_split_bias(agent_id, hx, hy)
-                ranked = base_cost + bias - 0.25  # slight bonus to favor HELP over fresh picks
+                ranked = base_cost + bias - 0.25
                 tie1 = chebyshev_distance(loc, Location(hx, hy))
                 tie2 = abs(hx - loc.x)
                 candidates.append((ranked, tie1, tie2, Location(hx, hy), path, base_cost, 1, True))
         j = j + 1
 
-    # 2) Fresh survivor targets with capacity-k claims
+    # 2) Fresh survivor targets with capacity-k
     i = 0
     while i < len(survivors):
         s = survivors[i]
@@ -282,9 +295,8 @@ def pick_best_target_and_path(loc, energy, survivors, round_num, agent_id):
     from_help = best[7]
 
     if from_help:
-        # consume one help slot and treat as claim of that slot (k=1)
         consume_help_slot(target_loc.x, target_loc.y)
-        register_claim(target_loc.x, target_loc.y, agent_id, 2, round_num)  # cap stays >=2 to not block partner
+        register_claim(target_loc.x, target_loc.y, agent_id, 2, round_num)
         try:
             send_message("CLAIM2|" + str(target_loc.x) + "|" + str(target_loc.y) + "|" + str(agent_id) + "|" + str(2) + "|" + str(round_num), [])
         except:
@@ -309,8 +321,21 @@ def think():
 
         if STATE.my_id is None:
             STATE.my_id = get_id()
+            STATE.energy_init = energy
+            STATE.energy_last = energy
+            log("[A" + str(STATE.my_id) + " R" + str(t) + "] INIT energy=" + str(energy))
             move(Direction.CENTER)
             return
+
+        # energy delta since last round (what actually happened after last_action)
+        if STATE.energy_last is None:
+            STATE.energy_last = energy
+        delta = STATE.energy_last - energy
+        STATE.last_spend = delta
+        log("[A" + str(STATE.my_id) + " R" + str(t) + "] LAST_ACTION=" + str(STATE.last_action) +
+            " | ΔE=" + str(delta) + " | E_now=" + str(energy))
+        STATE.energy_last = energy
+        STATE.last_action = "idle"
 
         # ingest CLAIM2 and HELP2
         try:
@@ -341,12 +366,14 @@ def think():
         except:
             survivors = []
 
-        # if standing on survivor -> save
+        # save if standing on survivor
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
             if isinstance(top_here, Survivor):
+                log("[A" + str(STATE.my_id) + " R" + str(t) + "] ACTION save()")
                 save()
+                STATE.last_action = "save"
                 STATE.known_saved.add((loc.x, loc.y))
                 STATE.current_target = None
                 STATE.current_path = []
@@ -355,7 +382,7 @@ def think():
         except:
             pass
 
-        # if standing on rubble -> dig or ask for help
+        # dig if on rubble (pair when needed)
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
@@ -366,7 +393,9 @@ def think():
                 except:
                     req = 1
                 if req == 1:
+                    log("[A" + str(STATE.my_id) + " R" + str(t) + "] ACTION dig() req=1")
                     dig()
+                    STATE.last_action = "dig"
                     return
                 else:
                     count_here = 1
@@ -375,26 +404,27 @@ def think():
                     except:
                         count_here = 1
                     if count_here >= 2:
+                        log("[A" + str(STATE.my_id) + " R" + str(t) + "] ACTION dig() req=2 with partner")
                         dig()
+                        STATE.last_action = "dig"
                         return
-                    # Not enough partners here: advertise HELP2 (remaining needed)
                     remaining = req - count_here
                     if remaining < 1:
                         remaining = 1
                     try:
                         send_message("HELP2|" + str(loc.x) + "|" + str(loc.y) + "|" + str(remaining) + "|" + str(t), [])
-                        # also re-broadcast CLAIM2 with k=req to keep capacity visible
                         send_message("CLAIM2|" + str(loc.x) + "|" + str(loc.y) + "|" + str(STATE.my_id) + "|" + str(req) + "|" + str(t), [])
                     except:
                         pass
                     register_help(loc.x, loc.y, remaining, t)
                     register_claim(loc.x, loc.y, STATE.my_id, req, t)
                     move(Direction.CENTER)
+                    STATE.last_action = "hold"
                     return
         except:
             pass
 
-        # dynamic recharge on charger: until plan cost + buffer
+        # recharge on charger until plan cost + buffer
         try:
             cell_here = get_cell_info_at(loc)
             if "CHARGING" in str(cell_here.type).upper():
@@ -403,7 +433,9 @@ def think():
                     plan_cost = estimate_path_cost(loc, STATE.current_path)
                 need_e = plan_cost + 10
                 if energy < need_e:
+                    log("[A" + str(STATE.my_id) + " R" + str(t) + "] ACTION recharge() targetE>=" + str(need_e))
                     recharge()
+                    STATE.last_action = "recharge"
                     return
                 STATE.charging_now = False
                 STATE.need_charging = False
@@ -413,6 +445,7 @@ def think():
 
         if not survivors:
             move(Direction.CENTER)
+            STATE.last_action = "hold"
             return
 
         # stuck detection -> replan
@@ -433,19 +466,23 @@ def think():
             s, path, cost, kreq, used_help = pick_best_target_and_path(loc, energy, survivors, t, STATE.my_id)
             if s is None:
                 move(Direction.CENTER)
+                STATE.last_action = "hold"
                 return
             STATE.current_target = s
             STATE.current_path = path
+            log("[A" + str(STATE.my_id) + " R" + str(t) + "] PLAN target=(" + str(s.x) + "," + str(s.y) + ") cost=" + str(cost))
 
         if not STATE.current_path:
             s, path, cost, kreq, used_help = pick_best_target_and_path(loc, energy, survivors, t, STATE.my_id)
             if s is None:
                 move(Direction.CENTER)
+                STATE.last_action = "hold"
                 return
             STATE.current_target = s
             STATE.current_path = path
+            log("[A" + str(STATE.my_id) + " R" + str(t) + "] PLAN reselect target=(" + str(s.x) + "," + str(s.y) + ") cost=" + str(cost))
 
-        # If not enough energy to finish current plan, detour to nearest charger
+        # energy-aware detour to nearest charger if needed
         if STATE.current_path:
             path_cost = estimate_path_cost(loc, STATE.current_path)
             if path_cost >= energy - 5:
@@ -471,17 +508,29 @@ def think():
                 if best is not None:
                     STATE.current_path = best_path
                     STATE.need_charging = True
+                    log("[A" + str(STATE.my_id) + " R" + str(t) + "] PLAN detour->charger at (" + str(best.x) + "," + str(best.y) + ") cost=" + str(best_cost))
 
-        # execute one step
+        # execute one step; log BEFORE moving with est step cost
         if STATE.current_path:
             d = STATE.current_path[0]
+            est_step = estimate_next_step_cost(loc, d)
+            log("[A" + str(STATE.my_id) + " R" + str(t) + "] MOVE " + str(d) +
+                (" | estStepCost=" + str(est_step) if est_step is not None else "") +
+                " | E_now=" + str(energy))
             STATE.current_path = STATE.current_path[1:]
+            STATE.last_action = "move"
             move(d)
         else:
             STATE.current_target = None
             move(Direction.CENTER)
-    except:
+            STATE.last_action = "hold"
+    except Exception as e:
+        try:
+            log("[A" + (str(STATE.my_id) if (STATE.my_id is not None) else "?") + " R" + (str(t) if ('t' in locals()) else "?") + "] ERROR " + str(e))
+        except:
+            pass
         try:
             move(Direction.CENTER)
+            STATE.last_action = "hold"
         except:
             pass
