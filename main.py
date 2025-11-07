@@ -2,7 +2,9 @@ from aegis_game.stub import *
 import heapq
 
 def chebyshev_distance(a, b):
-    return max(abs(a.x - b.x), abs(a.y - b.y))
+    dx = abs(a.x - b.x)
+    dy = abs(a.y - b.y)
+    return dx if dx > dy else dy
 
 def get_all_directions():
     return [
@@ -32,6 +34,8 @@ def simple_astar(start, goal):
         dirs = get_all_directions()
         for d in dirs:
             ok = True
+            nxt = None
+            cell = None
             try:
                 nxt = cur.add(d)
                 if not on_map(nxt):
@@ -46,9 +50,9 @@ def simple_astar(start, goal):
                 continue
             step = 1
             try:
-                step_val = int(cell.move_cost)
-                if step_val > 0:
-                    step = step_val
+                mv = int(cell.move_cost)
+                if mv > 0:
+                    step = mv
             except:
                 step = 1
             nk = (nxt.x, nxt.y)
@@ -70,14 +74,14 @@ def estimate_path_cost(start, path):
         try:
             nxt = cur.add(d)
             cell = get_cell_info_at(nxt)
-            cost = 1
+            step = 1
             try:
-                mc = int(cell.move_cost)
-                if mc > 0:
-                    cost = mc
+                mv = int(cell.move_cost)
+                if mv > 0:
+                    step = mv
             except:
-                cost = 1
-            total = total + cost
+                step = 1
+            total = total + step
             cur = nxt
         except:
             total = total + 1
@@ -95,6 +99,33 @@ class AgentState:
         self.charging_now = False
 
 STATE = AgentState()
+
+def _pick_best_target_and_path(loc, energy, survivors):
+    candidates = []
+    idx = 0
+    while idx < len(survivors):
+        s = survivors[idx]
+        if (s.x, s.y) in STATE.known_saved:
+            idx = idx + 1
+            continue
+        path = simple_astar(loc, s)
+        if path is not None:
+            cost = estimate_path_cost(loc, path)
+            tie1 = chebyshev_distance(loc, s)
+            tie2 = abs(s.x - loc.x)
+            # final tiny spreader by agent id so agents with equal costs choose different ones
+            spread = 0
+            try:
+                spread = (STATE.my_id % 3)
+            except:
+                spread = 0
+            candidates.append((cost, tie1, tie2, spread, s, path))
+        idx = idx + 1
+    if not candidates:
+        return None, None, None
+    candidates.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+    best = candidates[0]
+    return best[4], best[5], best[0]
 
 def think():
     global STATE
@@ -114,6 +145,7 @@ def think():
         except:
             survivors = []
 
+        # Save if standing on survivor
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
@@ -129,6 +161,7 @@ def think():
         except:
             pass
 
+        # Dig if on rubble
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
@@ -140,12 +173,12 @@ def think():
                     log("[A" + str(STATE.my_id) + " T" + str(t) + "] ACTION dig()")
                     return
                 else:
-                    here_count = 0
+                    count_here = 1
                     try:
-                        here_count = len(cell_here.agents)
+                        count_here = len(cell_here.agents)
                     except:
-                        here_count = 1
-                    if here_count >= 2:
+                        count_here = 1
+                    if count_here >= 2:
                         log("[A" + str(STATE.my_id) + " T" + str(t) + "] INTENT dig2 with partner at (" + str(loc.x) + "," + str(loc.y) + ")")
                         dig()
                         log("[A" + str(STATE.my_id) + " T" + str(t) + "] ACTION dig() (paired)")
@@ -158,6 +191,7 @@ def think():
         except:
             pass
 
+        # Recharge behavior
         try:
             cell_here = get_cell_info_at(loc)
             if "CHARGING" in str(cell_here.type).upper():
@@ -175,12 +209,14 @@ def think():
         except:
             pass
 
+        # If no survivors visible
         if not survivors:
             log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS no-survivors-seen, idle")
             move(Direction.CENTER)
             log("[A" + str(STATE.my_id) + " T" + str(t) + "] ACTION hold CENTER")
             return
 
+        # Stuck detection
         if STATE.last_location is not None:
             if (STATE.last_location.x == loc.x) and (STATE.last_location.y == loc.y):
                 STATE.stuck_count = STATE.stuck_count + 1
@@ -194,44 +230,40 @@ def think():
                 STATE.stuck_count = 0
         STATE.last_location = loc
 
+        # Choose target using reachable path-cost (prevents “one side waits”)
         if (STATE.current_target is None) or STATE.need_charging:
-            available = []
-            for s in survivors:
-                if (s.x, s.y) not in STATE.known_saved:
-                    available.append(s)
-            if not available:
-                log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS all-known survivors saved, idle")
+            s, path, cost = _pick_best_target_and_path(loc, energy, survivors)
+            if s is None:
+                log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS no-reachable-targets, idle")
                 move(Direction.CENTER)
                 log("[A" + str(STATE.my_id) + " T" + str(t) + "] ACTION hold CENTER")
                 return
-            closest = available[0]
-            i = 1
-            best_dist = chebyshev_distance(loc, closest)
-            while i < len(available):
-                d = chebyshev_distance(loc, available[i])
-                if d < best_dist:
-                    best_dist = d
-                    closest = available[i]
-                i = i + 1
-            STATE.current_target = closest
-            STATE.current_path = []
-            log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN target=(" + str(closest.x) + "," + str(closest.y) + ") from (" + str(loc.x) + "," + str(loc.y) + ")")
+            STATE.current_target = s
+            STATE.current_path = path
+            log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN target=(" + str(s.x) + "," + str(s.y) + ") cost=" + str(cost) + " from (" + str(loc.x) + "," + str(loc.y) + ")")
 
+        # If path lost or target became unreachable, reselect immediately
         if not STATE.current_path:
-            path = simple_astar(loc, STATE.current_target)
-            if not path:
-                log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS unreachable target=(" + str(STATE.current_target.x) + "," + str(STATE.current_target.y) + "), drop")
-                STATE.current_target = None
+            s, path, cost = _pick_best_target_and_path(loc, energy, survivors)
+            if s is None:
+                log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS lost-path and no-reachable-targets, idle")
                 move(Direction.CENTER)
                 log("[A" + str(STATE.my_id) + " T" + str(t) + "] ACTION hold CENTER")
                 return
-            cost = estimate_path_cost(loc, path)
-            log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN path_len=" + str(len(path)) + " cost=" + str(cost) + " E=" + str(energy))
-            if cost > (energy * 0.7):
+            STATE.current_target = s
+            STATE.current_path = path
+            log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN reselect target=(" + str(s.x) + "," + str(s.y) + ") cost=" + str(cost) + ")")
+
+        # Energy gate → optional charger detour
+        if STATE.current_path:
+            path_cost = estimate_path_cost(loc, STATE.current_path)
+            if path_cost > (energy * 0.7):
                 log("[A" + str(STATE.my_id) + " T" + str(t) + "] ENERGY low, seek charger")
                 chargers = []
+                tried = False
                 try:
                     chargers = get_charging_cells()
+                    tried = True
                 except:
                     chargers = []
                 if chargers:
@@ -242,7 +274,7 @@ def think():
                     while j < len(chargers):
                         c_loc = chargers[j]
                         p = simple_astar(loc, c_loc)
-                        if p:
+                        if p is not None:
                             cst = estimate_path_cost(loc, p)
                             if (cst < (energy - 10)) and (cst < best_cost):
                                 best = c_loc
@@ -253,19 +285,11 @@ def think():
                         STATE.current_path = best_path
                         STATE.need_charging = True
                         log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN route->charger (" + str(best.x) + "," + str(best.y) + ") len=" + str(len(best_path)) + " cost=" + str(best_cost))
-                    else:
-                        STATE.current_path = path
-                        STATE.need_charging = False
-                        log("[A" + str(STATE.my_id) + " T" + str(t) + "] ENERGY no-reachable-charger, proceed to target")
                 else:
-                    STATE.current_path = path
-                    STATE.need_charging = False
-                    log("[A" + str(STATE.my_id) + " T" + str(t) + "] ENERGY no chargers in map, proceed to target")
-            else:
-                STATE.current_path = path
-                STATE.need_charging = False
-                log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN proceed-to-target")
+                    if tried:
+                        log("[A" + str(STATE.my_id) + " T" + str(t) + "] ENERGY no chargers listed; proceed anyway")
 
+        # Execute one step
         if STATE.current_path:
             d = STATE.current_path[0]
             STATE.current_path = STATE.current_path[1:]
