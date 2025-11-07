@@ -39,7 +39,8 @@ def simple_astar(start, goal):
                     continue
                 try:
                     step = int(cell.move_cost)
-                    if step <= 0: step = 1
+                    if step <= 0:
+                        step = 1
                 except:
                     step = 1
                 nk = (nxt.x, nxt.y)
@@ -48,14 +49,15 @@ def simple_astar(start, goal):
                     came_from[nk] = (cur, d)
                     g[nk] = cand
                     f = cand + chebyshev_distance(nxt, goal)
-                    c += 1
+                    c = c + 1
                     heapq.heappush(open_set, (f, c, nxt))
             except:
                 continue
     return None
 
 def estimate_path_cost(start, path):
-    if not path: return 0
+    if not path:
+        return 0
     total = 0
     cur = start
     for d in path:
@@ -63,11 +65,12 @@ def estimate_path_cost(start, path):
             nxt = cur.add(d)
             cell = get_cell_info_at(nxt)
             cost = int(cell.move_cost)
-            if cost <= 0: cost = 1
-            total += cost
+            if cost <= 0:
+                cost = 1
+            total = total + cost
             cur = nxt
         except:
-            total += 1
+            total = total + 1
     return total
 
 class AgentState:
@@ -165,7 +168,7 @@ def think():
 
         if STATE.last_location:
             if STATE.last_location.x == loc.x and STATE.last_location.y == loc.y:
-                STATE.stuck_count += 1
+                STATE.stuck_count = STATE.stuck_count + 1
                 if STATE.stuck_count > 3:
                     log(f"[A{STATE.my_id} T{t}] STATUS stuck>3, replan")
                     STATE.current_path = []
@@ -243,7 +246,7 @@ def think():
             move(Direction.CENTER)
             log(f"[A{STATE.my_id} T{t}] ACTION hold CENTER")
     except Exception as e:
-        log(f"[A{STATE.my_id if STATE.my_id else '?'} T{get_round_number() if 'get_round_number' in globals() else '?'}] ERROR {e}")
+        log(f"[A{STATE.my_id if STATE.my_id else '?'} T{t if 't' in locals() else '?'}] ERROR {e}")
         try:
             move(Direction.CENTER)
             log(f"[A{STATE.my_id}] ACTION hold CENTER (on-error)")
