@@ -31,21 +31,32 @@ def simple_astar(start, goal):
                 ck = (prev.x, prev.y)
             path.reverse()
             return path
-        for d in get_all_directions():
+        dirs = get_all_directions()
+        for d in dirs:
+            ok = True
+            nxt = None
+            cell = None
             try:
                 nxt = cur.add(d)
                 if not on_map(nxt):
-                    continue
-                cell = get_cell_info_at(nxt)
-                if cell.is_killer_cell():
-                    continue
-                mv = int(cell.move_cost)
-                if mv <= 0:
-                    mv = 1
+                    ok = False
+                if ok:
+                    cell = get_cell_info_at(nxt)
+                    if cell.is_killer_cell():
+                        ok = False
             except:
+                ok = False
+            if not ok:
                 continue
+            step = 1
+            try:
+                mv = int(cell.move_cost)
+                if mv > 0:
+                    step = mv
+            except:
+                step = 1
             nk = (nxt.x, nxt.y)
-            cand = g[ck] + mv
+            cand = g[ck] + step
             if (nk not in g) or (cand < g[nk]):
                 came_from[nk] = (cur, d)
                 g[nk] = cand
@@ -63,14 +74,29 @@ def estimate_path_cost(start, path):
         try:
             nxt = cur.add(d)
             cell = get_cell_info_at(nxt)
-            mv = int(cell.move_cost)
-            if mv <= 0:
-                mv = 1
-            total = total + mv
+            step = 1
+            try:
+                mv = int(cell.move_cost)
+                if mv > 0:
+                    step = mv
+            except:
+                step = 1
+            total = total + step
             cur = nxt
         except:
             total = total + 1
     return total
+
+def tiny_split_bias(agent_id, sx, sy):
+    # Deterministic, very small positive bias different per (agent, survivor).
+    # Keeps nearest target dominant but breaks ties on tick 1 (before CLAIMs arrive).
+    try:
+        h = (agent_id * 73856093) ^ (sx * 19349663) ^ (sy * 83492791)
+    except:
+        h = (sx * 19349663) ^ (sy * 83492791)
+    # Map to [0, 0.999] and scale down to < 0.5 energy so it never beats a real cost gap.
+    val = h % 1000
+    return float(val) / 2000.0  # bias in [0.0, 0.4995]
 
 class AgentState:
     def __init__(self):
@@ -88,25 +114,41 @@ STATE = AgentState()
 
 def pick_best_target_and_path(loc, energy, survivors, round_num):
     candidates = []
-    for s in survivors:
+    i = 0
+    while i < len(survivors):
+        s = survivors[i]
         if (s.x, s.y) in STATE.known_saved:
+            i = i + 1
             continue
-        claim_owner = STATE.claims.get((s.x, s.y))
-        if claim_owner is not None and claim_owner != STATE.my_id:
+        # Respect claims if another agent already announced
+        owner = STATE.claims.get((s.x, s.y))
+        if owner is not None and owner != STATE.my_id:
+            i = i + 1
             continue
         path = simple_astar(loc, s)
-        if path is None:
-            continue
-        cost = estimate_path_cost(loc, path)
-        candidates.append((cost, chebyshev_distance(loc, s), s, path))
+        if path is not None:
+            cost = estimate_path_cost(loc, path)
+            # Add tiny deterministic bias so agents split immediately
+            bias = tiny_split_bias(STATE.my_id if STATE.my_id is not None else 0, s.x, s.y)
+            ranked = cost + bias
+            tie1 = chebyshev_distance(loc, s)
+            tie2 = abs(s.x - loc.x)
+            candidates.append((ranked, tie1, tie2, s, path, cost))
+        i = i + 1
     if not candidates:
         return None, None, None
-    candidates.sort(key=lambda t: (t[0], t[1]))
+    candidates.sort(key=lambda t: (t[0], t[1], t[2]))
     best = candidates[0]
-    # claim it so others skip
-    STATE.claims[(best[2].x, best[2].y)] = STATE.my_id
-    send_message("CLAIM|" + str(best[2].x) + "|" + str(best[2].y) + "|" + str(STATE.my_id), [])
-    return best[2], best[3], best[0]
+    target = best[3]
+    path = best[4]
+    true_cost = best[5]
+    # Broadcast a simple CLAIM so late joiners defer (arrives next tick)
+    try:
+        send_message("CLAIM|" + str(target.x) + "|" + str(target.y) + "|" + str(STATE.my_id), [])
+    except:
+        pass
+    STATE.claims[(target.x, target.y)] = STATE.my_id
+    return target, path, true_cost
 
 def think():
     global STATE
@@ -120,18 +162,21 @@ def think():
             move(Direction.CENTER)
             return
 
-        # read claim messages
+        # Ingest claims (1-tick latency); keeps others from piling on our pick next tick
         try:
             msgs = read_messages()
-            for m in msgs:
-                p = []
+            j = 0
+            while j < len(msgs):
+                m = msgs[j]
+                parts = []
                 try:
-                    p = m.message.split("|")
+                    parts = m.message.split("|")
                 except:
-                    p = []
-                if len(p) >= 4 and p[0] == "CLAIM":
-                    x = int(p[1]); y = int(p[2]); ag = int(p[3])
+                    parts = []
+                if len(parts) >= 4 and parts[0] == "CLAIM":
+                    x = int(parts[1]); y = int(parts[2]); ag = int(parts[3])
                     STATE.claims[(x, y)] = ag
+                j = j + 1
         except:
             pass
 
@@ -140,7 +185,7 @@ def think():
         except:
             survivors = []
 
-        # save if on survivor
+        # Save if standing on survivor
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
@@ -154,7 +199,7 @@ def think():
         except:
             pass
 
-        # dig if on rubble
+        # Dig if on rubble (handles single vs pair)
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
@@ -177,7 +222,7 @@ def think():
         except:
             pass
 
-        # charging tile behavior — dynamic energy goal
+        # Dynamic recharge while on a charger: only until enough for current plan (+ buffer)
         try:
             cell_here = get_cell_info_at(loc)
             if "CHARGING" in str(cell_here.type).upper():
@@ -198,7 +243,7 @@ def think():
             move(Direction.CENTER)
             return
 
-        # stuck detection
+        # Stuck detection -> replan
         if STATE.last_location is not None:
             if (STATE.last_location.x == loc.x) and (STATE.last_location.y == loc.y):
                 STATE.stuck_count = STATE.stuck_count + 1
@@ -211,6 +256,7 @@ def think():
                 STATE.stuck_count = 0
         STATE.last_location = loc
 
+        # Choose target (with bias) if none or after charging
         if STATE.current_target is None or STATE.need_charging:
             s, path, cost = pick_best_target_and_path(loc, energy, survivors, t)
             if s is None:
@@ -219,6 +265,7 @@ def think():
             STATE.current_target = s
             STATE.current_path = path
 
+        # If we lost a path (blocked by killer wall discovery), reselect
         if not STATE.current_path:
             s, path, cost = pick_best_target_and_path(loc, energy, survivors, t)
             if s is None:
@@ -227,9 +274,10 @@ def think():
             STATE.current_target = s
             STATE.current_path = path
 
-        # energy-aware reroute
+        # Energy-aware reroute: if not enough energy to finish current path, detour to a charger
         if STATE.current_path:
             path_cost = estimate_path_cost(loc, STATE.current_path)
+            # simple margin 5: ensures reaching charger safely
             if path_cost >= energy - 5:
                 chargers = []
                 try:
@@ -238,21 +286,23 @@ def think():
                     chargers = []
                 best = None
                 best_path = None
-                best_cost = 10**9
-                for c_loc in chargers:
+                best_cost = 1000000000
+                k = 0
+                while k < len(chargers):
+                    c_loc = chargers[k]
                     p = simple_astar(loc, c_loc)
-                    if p is None:
-                        continue
-                    cst = estimate_path_cost(loc, p)
-                    if cst < best_cost and cst < energy - 5:
-                        best = c_loc
-                        best_path = p
-                        best_cost = cst
+                    if p is not None:
+                        cst = estimate_path_cost(loc, p)
+                        if cst < best_cost and cst < energy - 5:
+                            best = c_loc
+                            best_path = p
+                            best_cost = cst
+                    k = k + 1
                 if best is not None:
                     STATE.current_path = best_path
                     STATE.need_charging = True
 
-        # execute step
+        # One step execution
         if STATE.current_path:
             d = STATE.current_path[0]
             STATE.current_path = STATE.current_path[1:]
