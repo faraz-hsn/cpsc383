@@ -97,34 +97,68 @@ class AgentState:
         self.known_saved = set()
         self.need_charging = False
         self.charging_now = False
+        # NEW: simple auction state
+        self.claims = {}      # (sx,sy) -> {"agent": int, "eta": int, "round": int}
+        self.claim_ttl = 5
 
 STATE = AgentState()
 
-def pick_best_target_and_path(loc, energy, survivors):
+def better_claim(new_eta, new_agent, new_round, old):
+    if old is None:
+        return True
+    if new_eta < old["eta"]:
+        return True
+    if new_eta > old["eta"]:
+        return False
+    if new_agent < old["agent"]:
+        return True
+    if new_agent > old["agent"]:
+        return False
+    return new_round < old["round"]
+
+def prune_expired_claims(current_round):
+    keys = list(STATE.claims.keys())
+    i = 0
+    while i < len(keys):
+        k = keys[i]
+        try:
+            if current_round - STATE.claims[k]["round"] > STATE.claim_ttl:
+                del STATE.claims[k]
+        except:
+            pass
+        i = i + 1
+
+def pick_best_target_and_path_auction(loc, energy, survivors, round_num):
     candidates = []
-    idx = 0
-    while idx < len(survivors):
-        s = survivors[idx]
+    i = 0
+    while i < len(survivors):
+        s = survivors[i]
         if (s.x, s.y) in STATE.known_saved:
-            idx = idx + 1
+            i = i + 1
             continue
         path = simple_astar(loc, s)
         if path is not None:
-            cost = estimate_path_cost(loc, path)
+            eta = estimate_path_cost(loc, path)
+            claim = STATE.claims.get((s.x, s.y))
+            if claim is not None:
+                # if someone else has a strictly better claim, skip this survivor
+                if not better_claim(eta, STATE.my_id, round_num, claim):
+                    i = i + 1
+                    continue
             tie1 = chebyshev_distance(loc, s)
             tie2 = abs(s.x - loc.x)
-            spread = 0
-            try:
-                spread = (STATE.my_id % 3)
-            except:
-                spread = 0
-            candidates.append((cost, tie1, tie2, spread, s, path))
-        idx = idx + 1
+            candidates.append((eta, tie1, tie2, s, path))
+        i = i + 1
     if not candidates:
         return None, None, None
-    candidates.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+    candidates.sort(key=lambda t: (t[0], t[1], t[2]))
     best = candidates[0]
-    return best[4], best[5], best[0]
+    # broadcast our claim so peers defer; RestrictedPython-safe string building
+    try:
+        send_message("CLAIM|" + str(best[3].x) + "|" + str(best[3].y) + "|" + str(STATE.my_id) + "|" + str(best[0]) + "|" + str(round_num), [])
+    except:
+        pass
+    return best[3], best[4], best[0]
 
 def think():
     global STATE
@@ -139,11 +173,38 @@ def think():
             move(Direction.CENTER)
             return
 
+        # NEW: read incoming CLAIM messages and maintain TTL
+        try:
+            msgs = read_messages()
+            k = 0
+            while k < len(msgs):
+                m = msgs[k]
+                parts = []
+                try:
+                    parts = m.message.split("|")
+                except:
+                    parts = []
+                if len(parts) >= 6 and parts[0] == "CLAIM":
+                    sx = int(parts[1])
+                    sy = int(parts[2])
+                    ag = int(parts[3])
+                    eta = int(parts[4])
+                    rnd = int(parts[5])
+                    key = (sx, sy)
+                    old = STATE.claims.get(key)
+                    if better_claim(eta, ag, rnd, old):
+                        STATE.claims[key] = {"agent": ag, "eta": eta, "round": rnd}
+                k = k + 1
+        except:
+            pass
+        prune_expired_claims(t)
+
         try:
             survivors = get_survs()
         except:
             survivors = []
 
+        # Save if standing on survivor
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
@@ -159,6 +220,7 @@ def think():
         except:
             pass
 
+        # Dig if on rubble
         try:
             cell_here = get_cell_info_at(loc)
             top_here = cell_here.top_layer
@@ -188,6 +250,7 @@ def think():
         except:
             pass
 
+        # Recharge behavior
         try:
             cell_here = get_cell_info_at(loc)
             if "CHARGING" in str(cell_here.type).upper():
@@ -211,6 +274,7 @@ def think():
             log("[A" + str(STATE.my_id) + " T" + str(t) + "] ACTION hold CENTER")
             return
 
+        # Stuck detection
         if STATE.last_location is not None:
             if (STATE.last_location.x == loc.x) and (STATE.last_location.y == loc.y):
                 STATE.stuck_count = STATE.stuck_count + 1
@@ -224,8 +288,9 @@ def think():
                 STATE.stuck_count = 0
         STATE.last_location = loc
 
+        # Choose or re-choose target with auction to prevent clumping
         if (STATE.current_target is None) or STATE.need_charging:
-            s, path, cost = pick_best_target_and_path(loc, energy, survivors)
+            s, path, cost = pick_best_target_and_path_auction(loc, energy, survivors, t)
             if s is None:
                 log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS no-reachable-targets, idle")
                 move(Direction.CENTER)
@@ -236,7 +301,7 @@ def think():
             log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN target=(" + str(s.x) + "," + str(s.y) + ") cost=" + str(cost) + " from (" + str(loc.x) + "," + str(loc.y) + ")")
 
         if not STATE.current_path:
-            s, path, cost = pick_best_target_and_path(loc, energy, survivors)
+            s, path, cost = pick_best_target_and_path_auction(loc, energy, survivors, t)
             if s is None:
                 log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS lost-path and no-reachable-targets, idle")
                 move(Direction.CENTER)
@@ -246,6 +311,7 @@ def think():
             STATE.current_path = path
             log("[A" + str(STATE.my_id) + " T" + str(t) + "] PLAN reselect target=(" + str(s.x) + "," + str(s.y) + ") cost=" + str(cost) + ")")
 
+        # Energy gate → optional charger detour
         if STATE.current_path:
             path_cost = estimate_path_cost(loc, STATE.current_path)
             if path_cost > (energy * 0.7):
@@ -280,6 +346,17 @@ def think():
                     if tried:
                         log("[A" + str(STATE.my_id) + " T" + str(t) + "] ENERGY no chargers listed; proceed anyway")
 
+        # Yield to a better claim that arrived after we picked (prevents last-second pile-up)
+        if STATE.current_target is not None:
+            cl = STATE.claims.get((STATE.current_target.x, STATE.current_target.y))
+            if cl is not None and cl["agent"] != STATE.my_id:
+                my_eta = estimate_path_cost(loc, STATE.current_path) if STATE.current_path else 10**9
+                if not better_claim(my_eta, STATE.my_id, t, cl):
+                    log("[A" + str(STATE.my_id) + " T" + str(t) + "] STATUS yield-to-better-claim for (" + str(STATE.current_target.x) + "," + str(STATE.current_target.y) + ")")
+                    STATE.current_target = None
+                    STATE.current_path = []
+
+        # Execute one step
         if STATE.current_path:
             d = STATE.current_path[0]
             STATE.current_path = STATE.current_path[1:]
