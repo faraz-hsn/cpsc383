@@ -1,668 +1,791 @@
-"""
-Course: CPSC 383
-Name:
-Semester: Fall 2025
-Date: November 6, 2025
+# CPSC 383 Fall 2025
+# Assignment 2
+# November 7th, 2025
 
-
-Assignment 2: Multi-Agent Cooperative System - IMPROVED VERSION
-"""
+# Mishela Alam - UCID: 30009432 - T05
+# Faraz Hosseini - UCID: 30224164 - T05
+# Mahdiyar Ashrafioun - UCID: 30232243 -T01
+# Mainga Musana - UCID: 30154346 - T01
 
 from aegis_game.stub import *
 import heapq
 
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def chebyshev_distance(loc1, loc2):
-    """Calculate Chebyshev distance (8-connected grid)"""
-    return max(abs(loc1.x - loc2.x), abs(loc1.y - loc2.y))
+# PATHFINDING FUNCTIONS
+# Calculates Chebyshev distance between two points.
+def chebyshev_distance(a, b):
+    dx = abs(a.x - b.x)
+    dy = abs(a.y - b.y)
+    return dx if dx > dy else dy
 
 
+# Returns all possible movement directions
 def get_all_directions():
-    """Return list of 8 directions in priority order"""
     return [
-        Direction.NORTH,
-        Direction.NORTHEAST,
-        Direction.EAST,
-        Direction.SOUTHEAST,
-        Direction.SOUTH,
-        Direction.SOUTHWEST,
-        Direction.WEST,
-        Direction.NORTHWEST
+        Direction.NORTH, Direction.NORTHEAST, Direction.EAST, Direction.SOUTHEAST,
+        Direction.SOUTH, Direction.SOUTHWEST, Direction.WEST, Direction.NORTHWEST
     ]
 
-
-# ============================================================================
-# A* Pathfinding
-# ============================================================================
-
+# A-star algorithm
 def simple_astar(start, goal):
-    """
-    Simple A* pathfinding returning list of directions.
-    Returns None if no path found.
-    """
+
+    # If already at goal, return empty path
     if start.x == goal.x and start.y == goal.y:
         return []
 
-    # Priority queue: (f_score, counter, location)
     open_set = []
     heapq.heappush(open_set, (0, 0, start))
+
+    # Track path reconstruction and movement costs
     came_from = {}
-    g_score = {(start.x, start.y): 0}
-    counter = 0
+    g = {(start.x, start.y): 0}
+    c = 0
 
+    # Get node with lowest f_score from priority queue
     while open_set:
-        _, _, current = heapq.heappop(open_set)
-        current_key = (current.x, current.y)
+        _, _, cur = heapq.heappop(open_set)
+        ck = (cur.x, cur.y)
 
-        # Goal reached
-        if current.x == goal.x and current.y == goal.y:
-            # Reconstruct path
+        # Check if reached goal
+        if cur.x == goal.x and cur.y == goal.y:
+
+            # Reconstruct path by backtracking
             path = []
-            while current_key in came_from:
-                prev_loc, direction = came_from[current_key]
-                path.append(direction)
-                current_key = (prev_loc.x, prev_loc.y)
+            while ck in came_from:
+                prev, d = came_from[ck]
+                path.append(d)
+                ck = (prev.x, prev.y)
             path.reverse()
             return path
 
-        # Explore neighbors
-        for direction in get_all_directions():
+        # Explore all possible directions
+        dirs = get_all_directions()
+        i = 0
+        while i < len(dirs):
+            d = dirs[i]
+            ok = True
+            nxt = None
+            cell = None
+
             try:
-                neighbor = current.add(direction)
+                # Calculate next position and validate if on map
+                nxt = cur.add(d)
+                if not on_map(nxt):
+                    ok = False
+                if ok:
+                    cell = get_cell_info_at(nxt)
 
-                if not on_map(neighbor):
-                    continue
-
-                cell_info = get_cell_info_at(neighbor)
-
-                # Skip killer cells
-                if cell_info.is_killer_cell():
-                    continue
-
-                # Get move cost
-                try:
-                    cost = int(cell_info.move_cost)
-                    if cost <= 0:
-                        cost = 1
-                except:
-                    cost = 1
-
-                neighbor_key = (neighbor.x, neighbor.y)
-                tentative_g = g_score[current_key] + cost
-
-                if neighbor_key not in g_score or tentative_g < g_score[neighbor_key]:
-                    came_from[neighbor_key] = (current, direction)
-                    g_score[neighbor_key] = tentative_g
-                    f_score = tentative_g + chebyshev_distance(neighbor, goal)
-                    counter = counter + 1
-                    heapq.heappush(open_set, (f_score, counter, neighbor))
+                    # Avoid dangerous cells
+                    if cell.is_killer_cell():
+                        ok = False
             except:
-                continue
+                ok = False
 
-    return None
+            if ok:
+                # Get movement cost from cell
+                step = 1
+                try:
+                    mv = int(cell.move_cost)
+                    if mv > 0:
+                        step = mv
+                except:
+                    step = 1
 
+                nk = (nxt.x, nxt.y)  # Next location key
+                cand = g[ck] + step  # Candidate g_score
 
+                # If found better path to this node
+                if (nk not in g) or (cand < g[nk]):
+                    came_from[nk] = (cur, d)  # Record path
+                    g[nk] = cand
+
+                    # Calculate f_score (g_score + heuristic)
+                    f = cand + chebyshev_distance(nxt, goal)
+                    c = c + 1
+                    heapq.heappush(open_set, (f, c, nxt))  # Add to open set
+
+            i = i + 1
+
+    return None  # No path found
+
+# Estimate total movement cost for a given path.
 def estimate_path_cost(start, path):
-    """Estimate total energy cost of a path"""
     if not path:
         return 0
 
     total = 0
-    current = start
-    for direction in path:
+    cur = start
+
+    i = 0
+    while i < len(path):
+        d = path[i]
         try:
-            next_loc = current.add(direction)
-            cell_info = get_cell_info_at(next_loc)
-            cost = int(cell_info.move_cost)
-            if cost <= 0:
-                cost = 1
-            total = total + cost
-            current = next_loc
+            nxt = cur.add(d)
+            cell = get_cell_info_at(nxt)
+            step = 1
+            try:
+                mv = int(cell.move_cost)
+                if mv > 0:
+                    step = mv
+            except:
+                step = 1
+            total = total + step
+            cur = nxt
         except:
-            total = total + 1
+            total = total + 1  # Default cost if error occurs
+        i = i + 1
 
     return total
 
-
-def find_best_charger(my_loc, my_energy):
-    """Find the best reachable charging station"""
+# Estimate cost to move in a specific direction from current location.
+def estimate_next_step_cost(cur_loc, direction):
     try:
-        chargers = get_charging_cells()
-        if not chargers:
-            return None, None
+        nxt = cur_loc.add(direction)
+        if not on_map(nxt):
+            return None
 
-        best_charger = None
-        best_charger_path = None
-        best_score = 999999
-
-        for charger in chargers:
-            charger_path = simple_astar(my_loc, charger)
-            if charger_path:
-                charger_cost = estimate_path_cost(my_loc, charger_path)
-                # Must be reachable with current energy (with safety margin)
-                if charger_cost < my_energy - 15:
-                    # Prefer closer chargers
-                    distance = chebyshev_distance(my_loc, charger)
-                    score = distance + charger_cost * 0.5
-                    if score < best_score:
-                        best_charger = charger
-                        best_charger_path = charger_path
-                        best_score = score
-
-        return best_charger, best_charger_path
+        cell = get_cell_info_at(nxt)
+        mv = 1
+        try:
+            mv2 = int(cell.move_cost)
+            if mv2 > 0:
+                mv = mv2
+        except:
+            mv = 1
+        return mv
     except:
-        return None, None
+        return None
 
+# HELPER FUNCTIONS
+# Generate a small deterministic bias value based on agent ID and coordinates.
+def tiny_split_bias(agent_id, sx, sy):
+    try:
+        # Create hash using prime numbers for good distribution
+        h = (agent_id * 73856093) ^ (sx * 19349663) ^ (sy * 83492791)
+    except:
+        h = (sx * 19349663) ^ (sy * 83492791)
 
-# ============================================================================
-# Agent State
-# ============================================================================
+    v = h % 1000  # Get value in range 0-999
+    return float(v) / 2000.0  # Convert to range 0-0.5
 
+# Determine how many agents are needed to clear rubble at given coordinates.
+def required_agents_for_xy(sx, sy):
+    try:
+        cell = get_cell_info_at(Location(sx, sy))
+        top = cell.top_layer
+        if isinstance(top, Rubble):
+            try:
+                r = int(top.agents_required)
+                if r >= 1:
+                    return r
+            except:
+                return 2
+        return 1
+    except:
+        pass
+
+    # Fallback: try drone scan if direct cell info fails
+    try:
+        layers = drone_scan(Location(sx, sy))
+        i = 0
+        while i < len(layers):
+            L = layers[i]
+            try:
+                if isinstance(L, Rubble):
+                    try:
+                        r = int(L.agents_required)
+                        if r >= 1:
+                            return r
+                    except:
+                        return 2
+            except:
+                pass
+            i = i + 1
+        return 1
+    except:
+        return 2
+
+ #  Tracks navigation, coordination, and energy management for an Agent
 class AgentState:
-    """Tracks agent state across rounds"""
 
     def __init__(self):
         self.my_id = None
         self.current_path = []
-        self.current_target = None
+        self.current_target = None  # target location
         self.last_location = None
         self.stuck_count = 0
-        self.known_saved_survivors = set()
-        self.claimed_survivors = {}  # survivor_loc -> (agent_id, round_claimed)
-        self.unreachable_survivors = set()  # Survivors with no path
-        self.need_charging = False
-        self.charging_now = False
-        self.last_energy_check = 0
-        self.agent_positions = {}  # agent_id -> (x, y, round)
-        self.help_requests = {}  # location -> (round, agents_needed)
-        self.last_broadcast_round = 0
+        self.known_saved = set()  # Set of saved survivor coordinates
+        self.need_charging = False  # Flag indicating low energy
+        self.charging_now = False  # Flag indicating currently charging
+        self.claims_cap = {}  # Tracks agent claims on targets: {(x,y): {max_agents, taken_agents, round}}
+        self.help_open = {}  # Tracks help requests: {(x,y): {needed_agents, round}}
+        self.energy_init = None
+        self.energy_last = None
+        self.last_action = "spawn"  # Last action performed
+        self.last_spend = 0
+        self.stage_charger = None
+        self.recharge_ticks_needed = 0
+        self.waiting_for_help = False
+        self.waiting_location = None
+        self.waiting_since = 0
+        self.help_requests_sent = set()  # Track sent help requests to avoid duplicates
 
 
+# Global state instance
 STATE = AgentState()
 
+# Register an agent's claim on a target location
+def register_claim(x, y, agent_id, k, round_num):
 
-# ============================================================================
-# Message Handling
-# ============================================================================
 
-def process_messages(round_num):
-    """Process all messages and update shared knowledge"""
+    key = (x, y)
+    entry = STATE.claims_cap.get(key)
+
+    if entry is None:
+        # Create new claim entry
+        entry = {"max": k, "taken": {}, "round": round_num}
+    else:
+        # Update existing entry
+        if k > entry.get("max", 1):
+            entry["max"] = k
+        entry["round"] = round_num
+
+    # Add this agent to taken set
+    taken = entry.get("taken", {})
+    taken[agent_id] = 1
+    entry["taken"] = taken
+    STATE.claims_cap[key] = entry
+
+# Get number of agents that have claimed a target.
+def claims_taken_for(x, y):
+
+    entry = STATE.claims_cap.get((x, y))
+    if entry is None:
+        return 0
+    return len(entry.get("taken", {}))
+
+# Get maximum number of agents needed at a target.
+def claims_max_for(x, y):
+
+    entry = STATE.claims_cap.get((x, y))
+    if entry is None:
+        return 0
+    return entry.get("max", 1)
+
+# Register a help request for a location.
+def register_help(x, y, needed, round_num):
+
+    STATE.help_open[(x, y)] = {"need": needed, "round": round_num}
+
+# Reduce the help needed count at a location when an agent responds.
+def consume_help_slot(x, y):
+
+    entry = STATE.help_open.get((x, y))
+    if entry is None:
+        return
+
+    need = entry.get("need", 0)
+    if need > 1:
+        entry["need"] = need - 1
+        STATE.help_open[(x, y)] = entry
+    else:
+        # Remove entry when no more help needed
+        try:
+            del STATE.help_open[(x, y)]
+        except:
+            pass
+
+
+# Clean up expired claims and help requests.
+def clean_old(current_round, ttl):
+
+    # Clean old claims
+    klist = list(STATE.claims_cap.keys())
+    i = 0
+    while i < len(klist):
+        k = klist[i]
+        try:
+            r = STATE.claims_cap[k].get("round", 0)
+            if current_round - r > ttl:
+                del STATE.claims_cap[k]
+        except:
+            pass
+        i = i + 1
+
+    # Clean old help requests
+    hlist = list(STATE.help_open.keys())
+    j = 0
+    while j < len(hlist):
+        k = hlist[j]
+        try:
+            r = STATE.help_open[k].get("round", 0)
+            if current_round - r > ttl:
+                del STATE.help_open[k]
+        except:
+            pass
+        j = j + 1
+
+
+# Calculate ceiling division (a/b rounded up).
+def ceil_div(a, b):
+
+    if a <= 0:
+        return 0
+    return (a + b - 1) // b
+
+
+# Find the best charging station to use as staging point for a long journey.
+def best_staging_charger(cur_loc, target_loc, cur_energy, action_energy):
+
     try:
-        messages = read_messages()
-        for msg in messages:
-            parts = msg.message.split("|")
-            if len(parts) < 2:
-                continue
+        chargers = get_charging_cells()
+    except:
+        chargers = []
 
-            msg_type = parts[0]
+    if not chargers:
+        return None, None, 0
 
-            # Track saved survivors
-            if msg_type == "SAVED":
-                try:
-                    x, y = int(parts[1]), int(parts[2])
-                    STATE.known_saved_survivors.add((x, y))
-                    # Remove from claimed if it was there
-                    if (x, y) in STATE.claimed_survivors:
-                        del STATE.claimed_survivors[(x, y)]
-                except:
-                    pass
+    best = None
+    best_path_to_c = None
+    best_total_time = None
 
-            # Track claimed survivors
-            elif msg_type == "CLAIM":
-                try:
-                    x, y = int(parts[1]), int(parts[2])
-                    agent_id = int(parts[3])
-                    surv_key = (x, y)
+    i = 0
+    while i < len(chargers):
+        c_loc = chargers[i]
+        # Find path to charger
+        p1 = simple_astar(cur_loc, c_loc)
+        if p1 is not None:
+            # Find path from charger to target
+            p2 = simple_astar(c_loc, target_loc)
+            if p2 is not None:
+                cost1 = estimate_path_cost(cur_loc, p1)  # Cost to reach charger
+                cost2 = estimate_path_cost(c_loc, p2)  # Cost from charger to target
 
-                    # Only update if not already claimed or if older claim
-                    if surv_key not in STATE.claimed_survivors:
-                        STATE.claimed_survivors[surv_key] = (agent_id, round_num)
-                    else:
-                        existing_agent, existing_round = STATE.claimed_survivors[surv_key]
-                        # Tie-break: lower agent ID wins
-                        if agent_id < existing_agent:
-                            STATE.claimed_survivors[surv_key] = (agent_id, round_num)
-                except:
-                    pass
+                # Calculate energy situation
+                energy_at_c = cur_energy - cost1  # Energy remaining when reaching charger
+                need_for_leg = cost2 + action_energy  # Energy needed for final leg + action
+                deficit = need_for_leg - energy_at_c  # Energy deficit
 
-            # Track unreachable survivors
-            elif msg_type == "UNREACHABLE":
-                try:
-                    x, y = int(parts[1]), int(parts[2])
-                    agent_id = int(parts[3])
-                    surv_key = (x, y)
-                    STATE.unreachable_survivors.add(surv_key)
-                    # Remove claim if this agent had claimed it
-                    if surv_key in STATE.claimed_survivors:
-                        claimed_agent, _ = STATE.claimed_survivors[surv_key]
-                        if claimed_agent == agent_id:
-                            del STATE.claimed_survivors[surv_key]
-                except:
-                    pass
+                # Calculate recharge ticks needed (5 energy per tick)
+                ticks = ceil_div(deficit, 5)
+                total_time = len(p1) + ticks + len(p2)  # Total time: travel + recharge + travel
 
-            # Track agent positions
-            elif msg_type == "POS":
-                try:
-                    agent_id = int(parts[1])
-                    x, y = int(parts[2]), int(parts[3])
-                    STATE.agent_positions[agent_id] = (x, y, round_num)
-                except:
-                    pass
+                # Select charger with minimum total time
+                if (best_total_time is None) or (total_time < best_total_time):
+                    best = c_loc
+                    best_path_to_c = p1
+                    best_total_time = total_time
+        i = i + 1
 
-            # Help requests for heavy rubble
-            elif msg_type == "HELP":
-                try:
-                    x, y = int(parts[1]), int(parts[2])
-                    agents_needed = int(parts[3]) if len(parts) > 3 else 2
-                    STATE.help_requests[(x, y)] = (round_num, agents_needed)
-                except:
-                    pass
+    if best is None:
+        return None, None, 0
 
-            # Recharged message
-            elif msg_type == "RECHARGED":
-                try:
-                    agent_id = int(parts[1])
-                    x, y = int(parts[2]), int(parts[3])
-                    log(f"[Agent {STATE.my_id}] Agent {agent_id} recharged at ({x},{y})")
-                except:
-                    pass
+    # Recalculate final values for the best charger
+    cost1b = estimate_path_cost(cur_loc, best_path_to_c)
+    p2b = simple_astar(best, target_loc)
+    cost2b = estimate_path_cost(best, p2b) if p2b is not None else 0
+    energy_at_c2 = cur_energy - cost1b
+    need_for_leg2 = cost2b + action_energy
+    ticks2 = ceil_div(need_for_leg2 - energy_at_c2, 5)
 
-    except Exception as e:
-        log(f"[Agent {STATE.my_id}] Error processing messages: {e}")
+    return best, best_path_to_c, ticks2
 
 
-def broadcast_position(my_loc, round_num):
-    """Periodically broadcast position for coordination"""
-    # Broadcast every 5 rounds
-    if round_num - STATE.last_broadcast_round >= 5:
-        send_message(f"POS|{STATE.my_id}|{my_loc.x}|{my_loc.y}", [])
-        STATE.last_broadcast_round = round_num
+# Select the best target from available survivors and help requests.
+def pick_best_target_and_path(loc, energy, survivors, round_num, agent_id):
 
+    candidates = []
 
-# ============================================================================
-# Target Selection
-# ============================================================================
-
-def select_best_target(my_loc, survivors, my_energy, round_num):
-    """
-    Select the best survivor to target with improved coordination.
-    Returns (target, is_help_request)
-    """
-    # Filter survivors
-    available_survivors = []
-
-    for surv in survivors:
-        surv_key = (surv.x, surv.y)
-
-        # Skip if saved
-        if surv_key in STATE.known_saved_survivors:
-            continue
-
-        # Skip if unreachable
-        if surv_key in STATE.unreachable_survivors:
-            continue
-
-        # Check if claimed by someone else
-        if surv_key in STATE.claimed_survivors:
-            claimed_agent, claim_round = STATE.claimed_survivors[surv_key]
-            # Only skip if claimed by another agent recently (within 20 rounds)
-            if claimed_agent != STATE.my_id and (round_num - claim_round) < 20:
-                continue
-
-        available_survivors.append(surv)
-
-    if not available_survivors:
-        return None, False
-
-    # PRIORITY 1: Check for help requests (heavy rubble)
-    for loc, (req_round, agents_needed) in list(STATE.help_requests.items()):
-        # Only respond to recent requests (within 10 rounds)
-        if round_num - req_round > 10:
-            del STATE.help_requests[loc]
-            continue
-
-        # Check if this location has a survivor
-        for surv in available_survivors:
-            if surv.x == loc[0] and surv.y == loc[1]:
-                # Check if we can reach it
-                path = simple_astar(my_loc, surv)
-                if path is not None:
-                    path_cost = estimate_path_cost(my_loc, path)
-                    # Check energy with charging consideration
-                    if path_cost < my_energy * 0.6:
-                        log(f"[Agent {STATE.my_id}] Responding to help request at ({surv.x},{surv.y})")
-                        return surv, True
-
-    # PRIORITY 2: Unclaimed survivors (best for distribution)
-    unclaimed = []
-    for surv in available_survivors:
-        surv_key = (surv.x, surv.y)
-        if surv_key not in STATE.claimed_survivors:
-            # Check if reachable
-            path = simple_astar(my_loc, surv)
+    # First consider help requests (higher priority)
+    hkeys = list(STATE.help_open.keys())
+    j = 0
+    while j < len(hkeys):
+        hx, hy = hkeys[j]
+        entry = STATE.help_open[(hx, hy)]
+        need = entry.get("need", 0)
+        if need > 0:
+            path = simple_astar(loc, Location(hx, hy))
             if path is not None:
-                unclaimed.append((surv, path))
+                base_cost = estimate_path_cost(loc, path)
+                bias = tiny_split_bias(agent_id, hx, hy)
+                ranked = base_cost + bias - 2.0  # Bias toward help requests
+                tie1 = chebyshev_distance(loc, Location(hx, hy))
+                tie2 = abs(hx - loc.x)
+                candidates.append((ranked, tie1, tie2, Location(hx, hy), path, base_cost, 1, True))
+        j = j + 1
 
-    if unclaimed:
-        # Score by: distance + path_cost, prefer closer and cheaper
-        # Add tie-breaker so different agents pick different survivors
-        best = None
-        best_score = 999999
+    # Then consider regular survivors
+    i = 0
+    while i < len(survivors):
+        s = survivors[i]
+        # Skip already saved survivors
+        if (s.x, s.y) in STATE.known_saved:
+            i = i + 1
+            continue
 
-        for surv, path in unclaimed:
-            distance = chebyshev_distance(my_loc, surv)
-            path_cost = estimate_path_cost(my_loc, path)
+        # Check if target is already fully claimed
+        kreq = claims_max_for(s.x, s.y)
+        if kreq <= 0:
+            kreq = required_agents_for_xy(s.x, s.y)
+        taken = claims_taken_for(s.x, s.y)
+        if kreq > 0 and taken >= kreq:
+            i = i + 1
+            continue
 
-            # Factor in energy - penalize expensive paths if low on energy
-            energy_factor = 1.0
-            if path_cost > my_energy * 0.5:
-                energy_factor = 2.0
+        # Find path to survivor
+        path = simple_astar(loc, s)
+        if path is not None:
+            base_cost = estimate_path_cost(loc, path)
+            bias = tiny_split_bias(agent_id, s.x, s.y)
+            ranked = base_cost + bias
+            tie1 = chebyshev_distance(loc, s)
+            tie2 = abs(s.x - loc.x)
+            candidates.append((ranked, tie1, tie2, s, path, base_cost, kreq, False))
+        i = i + 1
 
-            # Add agent-specific tie-breaker
-            tie_breaker = (STATE.my_id * 0.01)
-            score = distance + path_cost * 0.5 * energy_factor + tie_breaker
+    if not candidates:
+        return None, None, None, None, False
 
-            if score < best_score:
-                best = surv
-                best_score = score
+    # Sort by primary cost, then tie-breakers
+    candidates.sort(key=lambda t: (t[0], t[1], t[2]))
+    best = candidates[0]
 
-        if best:
-            return best, False
+    target_loc = best[3]
+    path = best[4]
+    true_cost = best[5]
+    kreq = best[6]
+    from_help = best[7]
 
-    # PRIORITY 3: Claimed survivors (old claims or our own)
-    claimed_available = []
-    for surv in available_survivors:
-        surv_key = (surv.x, surv.y)
-        if surv_key in STATE.claimed_survivors:
-            claimed_agent, claim_round = STATE.claimed_survivors[surv_key]
-            # Take old claims or our own claims
-            if claimed_agent == STATE.my_id or (round_num - claim_round) >= 20:
-                path = simple_astar(my_loc, surv)
-                if path is not None:
-                    claimed_available.append((surv, path))
+    # Register claim and notify other agents
+    if from_help:
+        consume_help_slot(target_loc.x, target_loc.y)
+        register_claim(target_loc.x, target_loc.y, agent_id, 2, round_num)
+        try:
+            send_message("CLAIM2|" + str(target_loc.x) + "|" + str(target_loc.y) + "|" + str(agent_id) + "|" + str(
+                2) + "|" + str(round_num), [])
+        except:
+            pass
+    else:
+        if kreq <= 0:
+            kreq = required_agents_for_xy(target_loc.x, target_loc.y)
+        register_claim(target_loc.x, target_loc.y, agent_id, kreq, round_num)
+        try:
+            send_message("CLAIM2|" + str(target_loc.x) + "|" + str(target_loc.y) + "|" + str(agent_id) + "|" + str(
+                kreq) + "|" + str(round_num), [])
+        except:
+            pass
 
-    if claimed_available:
-        # Pick closest
-        best = min(claimed_available,
-                   key=lambda sp: chebyshev_distance(my_loc, sp[0]))
-        return best[0], False
-
-    return None, False
+    return target_loc, path, true_cost, kreq, from_help
 
 
-# ============================================================================
-# Main Think Function
-# ============================================================================
-
+# MAIN AGENT
+# Coordinates movement, digging, saving, charging, and agent cooperation.
 def think():
-    """Main decision function with improved coordination"""
+
     global STATE
 
     try:
-        # Get basic info
-        round_num = get_round_number()
-        my_loc = get_location()
-        my_energy = get_energy_level()
+        # Get current game state
+        t = get_round_number()
+        loc = get_location()
+        energy = get_energy_level()
 
-        # Initialize on first round
+        # Initializes agent state on first call
         if STATE.my_id is None:
             STATE.my_id = get_id()
-            log(f"[Agent {STATE.my_id}] Starting, Energy: {my_energy}")
+            STATE.energy_init = energy
+            STATE.energy_last = energy
+            move(Direction.CENTER)
+            return
 
-            if round_num == 1:
-                move(Direction.CENTER)
-                send_message(f"POS|{STATE.my_id}|{my_loc.x},{my_loc.y}", [])
-                return
+        # Tracks energy usage
+        if STATE.energy_last is None:
+            STATE.energy_last = energy
+        delta = STATE.energy_last - energy
+        STATE.last_spend = delta
+        STATE.energy_last = energy
+        STATE.last_action = "idle"
 
-        # Get survivors
+        # Processes incoming messages from other agents
+        try:
+            msgs = read_messages()
+            m = 0
+            while m < len(msgs):
+                msg = msgs[m]
+                parts = []
+                try:
+                    parts = msg.message.split("|")
+                except:
+                    parts = []
+
+                # Processes claim messages
+                if len(parts) >= 6 and parts[0] == "CLAIM2":
+                    sx = int(parts[1]);
+                    sy = int(parts[2])
+                    ag = int(parts[3]);
+                    kreq = int(parts[4]);
+                    r = int(parts[5])
+                    register_claim(sx, sy, ag, kreq, r)
+
+                # Processes help request messages
+                elif len(parts) >= 5 and parts[0] == "HELP2":
+                    hx = int(parts[1]);
+                    hy = int(parts[2])
+                    need = int(parts[3]);
+                    r = int(parts[4])
+                    register_help(hx, hy, need, r)
+
+                m = m + 1
+        except:
+            pass
+
+        # Cleans up old coordination data
+        clean_old(t, 8)
+
+        # Gets list of survivors
         try:
             survivors = get_survs()
         except:
             survivors = []
 
-        log(f"[Agent {STATE.my_id}] R{round_num} Pos:({my_loc.x},{my_loc.y}) Energy:{my_energy} Survs:{len(survivors)}")
-
-        # Process messages from other agents
-        process_messages(round_num)
-
-        # Broadcast position periodically
-        broadcast_position(my_loc, round_num)
-
-        # =================================================================
-        # CHECK IF ON SURVIVOR - SAVE IT
-        # =================================================================
+        # Checks if standing on a survivor that needs saving
         try:
-            cell = get_cell_info_at(my_loc)
-            top_layer = cell.top_layer
-
-            if isinstance(top_layer, Survivor):
-                log(f"[Agent {STATE.my_id}] On survivor - SAVING!")
-                save()
-                STATE.known_saved_survivors.add((my_loc.x, my_loc.y))
-                send_message(f"SAVED|{my_loc.x}|{my_loc.y}", [])
-
-                # Clear current target and look for next one
+            cell_here = get_cell_info_at(loc)
+            top_here = cell_here.top_layer
+            if isinstance(top_here, Survivor):
+                save()  # Perform save action
+                STATE.last_action = "save"
+                STATE.known_saved.add((loc.x, loc.y))  # Mark as saved
+                # Reset navigation state
                 STATE.current_target = None
                 STATE.current_path = []
                 STATE.need_charging = False
-                STATE.stuck_count = 0
-
-                # Remove from claimed if it was there
-                if (my_loc.x, my_loc.y) in STATE.claimed_survivors:
-                    del STATE.claimed_survivors[(my_loc.x, my_loc.y)]
-
-                log(f"[Agent {STATE.my_id}] Survivor saved! Looking for next target...")
+                STATE.stage_charger = None
+                STATE.recharge_ticks_needed = 0
+                STATE.waiting_for_help = False
                 return
-        except Exception as e:
-            log(f"[Agent {STATE.my_id}] Error checking survivor: {e}")
+        except:
+            pass
 
-        # =================================================================
-        # CHECK IF ON RUBBLE - DIG IT
-        # =================================================================
+        # Checks if standing on rubble that needs digging
         try:
-            cell = get_cell_info_at(my_loc)
-            top_layer = cell.top_layer
+            cell_here = get_cell_info_at(loc)
+            top_here = cell_here.top_layer
+            if isinstance(top_here, Rubble):
+                req = 1
+                try:
+                    req = int(top_here.agents_required)
+                except:
+                    req = 1
 
-            if isinstance(top_layer, Rubble):
-                agents_required = top_layer.agents_required
-
-                if agents_required == 1:
-                    log(f"[Agent {STATE.my_id}] Digging light rubble")
+                # Single-agent rubble
+                if req == 1:
                     dig()
+                    STATE.last_action = "dig"
+                    STATE.waiting_for_help = False
                     return
+                else:
+                    # Multi-agent rubble - check if enough agents present
+                    count_here = 1
+                    try:
+                        count_here = len(cell_here.agents)
+                    except:
+                        count_here = 1
 
-                elif agents_required >= 2:
-                    agents_here = cell.agents
-                    log(f"[Agent {STATE.my_id}] Heavy rubble - {len(agents_here)}/{agents_required} agents here")
-
-                    if len(agents_here) >= agents_required:
-                        log(f"[Agent {STATE.my_id}] Digging heavy rubble with team")
+                    if count_here >= req:
+                        # Enough agents - start digging
                         dig()
+                        STATE.last_action = "dig"
+                        STATE.waiting_for_help = False
                         return
                     else:
-                        log(f"[Agent {STATE.my_id}] Waiting for team members ({len(agents_here)}/{agents_required})")
-                        send_message(f"HELP|{my_loc.x}|{my_loc.y}|{agents_required}", [])
-                        move(Direction.CENTER)
-                        return
-        except Exception as e:
-            log(f"[Agent {STATE.my_id}] Error checking rubble: {e}")
+                        # Not enough agents - request help
+                        help_key = (loc.x, loc.y)
+                        if help_key not in STATE.help_requests_sent:
+                            STATE.help_requests_sent.add(help_key)
+                            remaining = req - count_here
+                            try:
+                                # Broadcast help request and claim
+                                send_message(
+                                    "HELP2|" + str(loc.x) + "|" + str(loc.y) + "|" + str(remaining) + "|" + str(t), [])
+                                send_message(
+                                    "CLAIM2|" + str(loc.x) + "|" + str(loc.y) + "|" + str(STATE.my_id) + "|" + str(
+                                        req) + "|" + str(t), [])
+                            except:
+                                pass
+                            register_help(loc.x, loc.y, remaining, t)
+                            register_claim(loc.x, loc.y, STATE.my_id, req, t)
 
-        # =================================================================
-        # CHECK IF ON CHARGING STATION
-        # =================================================================
-        try:
-            cell = get_cell_info_at(my_loc)
-            cell_type_str = str(cell.type)
-
-            if 'CHARGING' in cell_type_str.upper():
-                # Charge until reasonably full (80%)
-                if my_energy < 80:
-                    log(f"[Agent {STATE.my_id}] Recharging ({my_energy} -> {my_energy + 5})")
-                    recharge()
-                    STATE.charging_now = True
-                    return
-                else:
-                    # Done charging - clear flags and return to replan next round
-                    log(f"[Agent {STATE.my_id}] Fully charged ({my_energy}), leaving charger")
-                    STATE.need_charging = False
-                    STATE.charging_now = False
-                    STATE.current_path = []  # Clear path so we replan
-                    STATE.current_target = None  # Clear target to select new one
-                    send_message(f"RECHARGED|{STATE.my_id}|{my_loc.x}|{my_loc.y}", [])
-                    move(Direction.CENTER)  # Move to leave the charger
-                    return
+                        # Waits for help, but timeout after 5 rounds
+                        if t - STATE.waiting_since > 5:
+                            STATE.waiting_for_help = False
+                            STATE.current_target = None
+                            STATE.current_path = []
+                        else:
+                            STATE.waiting_for_help = True
+                            STATE.waiting_location = loc
+                            if STATE.waiting_since == 0:
+                                STATE.waiting_since = t
+                            move(Direction.CENTER)  # Stay in place
+                            STATE.last_action = "hold"
+                            return
         except:
             pass
 
-        # =================================================================
-        # CHECK FOR CRITICAL LOW ENERGY
-        # =================================================================
-        if my_energy < 30 and not STATE.charging_now:
-            log(f"[Agent {STATE.my_id}] CRITICAL LOW ENERGY! Seeking charger immediately")
-            charger, charger_path = find_best_charger(my_loc, my_energy)
-
-            if charger and charger_path:
-                log(f"[Agent {STATE.my_id}] Emergency route to charger at ({charger.x},{charger.y})")
-                STATE.current_path = charger_path
-                STATE.current_target = None
-                STATE.need_charging = True
-
-                if STATE.current_path:
-                    next_dir = STATE.current_path.pop(0)
-                    move(next_dir)
+        # Handles charging station logic
+        # Only does charging when necessary, and only when the agent needs more energy
+        try:
+            cell_here = get_cell_info_at(loc)
+            if "CHARGING" in str(cell_here.type).upper():
+                if STATE.recharge_ticks_needed > 0:
+                    # Continue recharging
+                    recharge()
+                    STATE.recharge_ticks_needed = STATE.recharge_ticks_needed - 1
+                    STATE.last_action = "recharge"
                     return
-            else:
-                log(f"[Agent {STATE.my_id}] NO REACHABLE CHARGER - Moving carefully")
-                move(Direction.CENTER)
-                return
+                else:
+                    # Finished charging - resume path to target
+                    if STATE.stage_charger is not None and STATE.current_target is not None:
+                        p2 = simple_astar(loc, STATE.current_target)
+                        if p2 is not None:
+                            STATE.current_path = p2
+                        else:
+                            STATE.current_path = []
+                        STATE.stage_charger = None
+        except:
+            pass
 
-        # If no survivors, wait
-        if not survivors:
-            log(f"[Agent {STATE.my_id}] No survivors - mission complete")
-            move(Direction.CENTER)
-            return
-
-        # =================================================================
-        # DETECT IF STUCK - CLEAR PATH AND REPLAN
-        # =================================================================
-        if STATE.last_location:
-            if STATE.last_location.x == my_loc.x and STATE.last_location.y == my_loc.y:
-                STATE.stuck_count = STATE.stuck_count + 1
-                if STATE.stuck_count > 2:
-                    log(f"[Agent {STATE.my_id}] STUCK - replanning completely")
-
-                    # Unclaim current target if we have one
-                    if STATE.current_target:
-                        surv_key = (STATE.current_target.x, STATE.current_target.y)
-                        if surv_key in STATE.claimed_survivors:
-                            claimed_agent, _ = STATE.claimed_survivors[surv_key]
-                            if claimed_agent == STATE.my_id:
-                                del STATE.claimed_survivors[surv_key]
-
-                    STATE.current_path = []
-                    STATE.current_target = None
-                    STATE.need_charging = False
-                    STATE.stuck_count = 0
-            else:
-                STATE.stuck_count = 0
-        STATE.last_location = my_loc
-
-        # =================================================================
-        # SELECT TARGET SURVIVOR
-        # =================================================================
-        if STATE.current_target is None or STATE.need_charging:
-            target, is_help = select_best_target(my_loc, survivors, my_energy, round_num)
-
-            if target is None:
-                log(f"[Agent {STATE.my_id}] No available targets - waiting")
-                move(Direction.CENTER)
-                return
-
-            STATE.current_target = target
+        # Timeout for waiting for help
+        if STATE.waiting_for_help and t - STATE.waiting_since > 5:
+            STATE.waiting_for_help = False
+            STATE.current_target = None
             STATE.current_path = []
 
-            # Claim this survivor (unless responding to help request)
-            if not is_help:
-                send_message(f"CLAIM|{target.x}|{target.y}|{STATE.my_id}", [])
-                STATE.claimed_survivors[(target.x, target.y)] = (STATE.my_id, round_num)
+        # If no survivors and no current target, stay put
+        if not survivors and STATE.current_target is None:
+            move(Direction.CENTER)
+            STATE.last_action = "hold"
+            return
 
-            log(f"[Agent {STATE.my_id}] New target: ({target.x},{target.y}){' [HELP]' if is_help else ''}")
+        # Stuck detection - reset if not moving for several ticks
+        if STATE.last_location is not None:
+            if (STATE.last_location.x == loc.x) and (STATE.last_location.y == loc.y):
+                STATE.stuck_count = STATE.stuck_count + 1
+                if STATE.stuck_count > 3:
+                    # Reset navigation state if stuck
+                    STATE.current_path = []
+                    STATE.need_charging = False
+                    STATE.stuck_count = 0
+                    STATE.waiting_for_help = False
+                    STATE.current_target = None
+            else:
+                STATE.stuck_count = 0
 
-        # =================================================================
-        # PLAN PATH WITH ENERGY MANAGEMENT
-        # =================================================================
-        if not STATE.current_path:
-            log(f"[Agent {STATE.my_id}] Planning path to ({STATE.current_target.x},{STATE.current_target.y})")
+        STATE.last_location = loc
 
-            # Check if target is still reachable
-            direct_path = simple_astar(my_loc, STATE.current_target)
-
-            if direct_path is None:
-                log(f"[Agent {STATE.my_id}] No path to target - marking unreachable")
-
-                # Unclaim this survivor and mark unreachable
-                surv_key = (STATE.current_target.x, STATE.current_target.y)
-                STATE.unreachable_survivors.add(surv_key)
-
-                if surv_key in STATE.claimed_survivors:
-                    claimed_agent, _ = STATE.claimed_survivors[surv_key]
-                    if claimed_agent == STATE.my_id:
-                        del STATE.claimed_survivors[surv_key]
-
-                send_message(f"UNREACHABLE|{surv_key[0]}|{surv_key[1]}|{STATE.my_id}", [])
-                STATE.current_target = None
+        # Selects new target if none current or waiting for help
+        if STATE.current_target is None or STATE.waiting_for_help:
+            s, path, cost, kreq, used_help = pick_best_target_and_path(loc, energy, survivors, t, STATE.my_id)
+            if s is None:
                 move(Direction.CENTER)
+                STATE.last_action = "hold"
                 return
 
-            path_cost = estimate_path_cost(my_loc, direct_path)
-            log(f"[Agent {STATE.my_id}] Path cost: {path_cost}, Current energy: {my_energy}")
+            ACTION_ENERGY = 1  # Energy cost for final action (dig/save)
+            total_need = cost + ACTION_ENERGY
 
-            #CHARGING STRATEGY: Need charging if:
-            # 1. Path cost > 50% of current energy (more conservative), OR
-            # 2. Current energy < 50 and path cost > 25% of energy
-            needs_charge = (path_cost > my_energy * 0.5) or (my_energy < 50 and path_cost > my_energy * 0.25)
-
-            if needs_charge and not STATE.charging_now:
-                log(f"[Agent {STATE.my_id}] Need charging before target!")
-
-                charger, charger_path = find_best_charger(my_loc, my_energy)
-
-                if charger and charger_path:
-                    log(f"[Agent {STATE.my_id}] Routing to charger at ({charger.x},{charger.y})")
-                    STATE.current_path = charger_path
-                    STATE.need_charging = True
-                else:
-                    log(f"[Agent {STATE.my_id}] No reachable charger - trying direct (risky!)")
-                    STATE.current_path = direct_path
-                    STATE.need_charging = False
+            if total_need <= energy:
+                # Enough energy - go directly to target
+                STATE.current_target = s
+                STATE.current_path = path
+                STATE.stage_charger = None
+                STATE.recharge_ticks_needed = 0
+                STATE.waiting_for_help = False
             else:
-                # Have enough energy for direct path
-                STATE.current_path = direct_path
-                STATE.need_charging = False
+                # Not enough energy - find staging charger
+                c_loc, p_to_c, ticks = best_staging_charger(loc, s, energy, ACTION_ENERGY)
+                STATE.current_target = s
+                if c_loc is not None and p_to_c is not None:
+                    STATE.current_path = p_to_c
+                    STATE.stage_charger = c_loc
+                    STATE.recharge_ticks_needed = ticks
+                    STATE.waiting_for_help = False
+                else:
+                    # No charger found - proceed anyway
+                    STATE.current_path = path
+                    STATE.stage_charger = None
+                    STATE.recharge_ticks_needed = 0
+                    STATE.waiting_for_help = False
 
-        # =================================================================
-        # EXECUTE NEXT MOVE
-        # =================================================================
+        # Recalculates path if current path is empty but target exists
+        if not STATE.current_path and STATE.current_target is not None:
+            ACTION_ENERGY = 1
+            direct = simple_astar(loc, STATE.current_target)
+            if direct is not None:
+                cost = estimate_path_cost(loc, direct)
+                total_need = cost + ACTION_ENERGY
+
+                if total_need <= energy:
+                    STATE.current_path = direct
+                    STATE.stage_charger = None
+                    STATE.recharge_ticks_needed = 0
+                else:
+                    # Find charger for energy boost
+                    c_loc, p_to_c, ticks = best_staging_charger(loc, STATE.current_target, energy, ACTION_ENERGY)
+                    if c_loc is not None and p_to_c is not None:
+                        STATE.current_path = p_to_c
+                        STATE.stage_charger = c_loc
+                        STATE.recharge_ticks_needed = ticks
+                    else:
+                        STATE.current_path = direct
+                        STATE.stage_charger = None
+                        STATE.recharge_ticks_needed = 0
+            else:
+                STATE.current_target = None
+
+        # Final fallback: try to find any target
+        if STATE.current_target is None:
+            if not STATE.current_path:
+                s, path, cost, kreq, used_help = pick_best_target_and_path(loc, energy, survivors, t, STATE.my_id)
+                if s is None:
+                    move(Direction.CENTER)
+                    STATE.last_action = "hold"
+                    return
+
+                ACTION_ENERGY = 1
+                total_need = cost + ACTION_ENERGY
+
+                if total_need <= energy:
+                    STATE.current_target = s
+                    STATE.current_path = path
+                    STATE.stage_charger = None
+                    STATE.recharge_ticks_needed = 0
+                else:
+                    c_loc, p_to_c, ticks = best_staging_charger(loc, s, energy, ACTION_ENERGY)
+                    STATE.current_target = s
+                    if c_loc is not None and p_to_c is not None:
+                        STATE.current_path = p_to_c
+                        STATE.stage_charger = c_loc
+                        STATE.recharge_ticks_needed = ticks
+                    else:
+                        STATE.current_path = path
+                        STATE.stage_charger = None
+                        STATE.recharge_ticks_needed = 0
+
+        # Executes next movement step if path exists
         if STATE.current_path:
-            next_dir = STATE.current_path.pop(0)
-            log(f"[Agent {STATE.my_id}] Moving {next_dir} (steps left: {len(STATE.current_path)})")
-            move(next_dir)
+            d = STATE.current_path[0]
+            STATE.current_path = STATE.current_path[1:]
+            STATE.last_action = "move"
+            move(d)
         else:
-            log(f"[Agent {STATE.my_id}] No path - waiting")
-            STATE.current_target = None
+            # No movement possible - stay in place
             move(Direction.CENTER)
+            STATE.last_action = "hold"
 
-    except Exception as e:
-        import traceback
-        log(f"[Agent {STATE.my_id if STATE.my_id else '?'}] ERROR: {e}")
-        for line in traceback.format_exc().splitlines():
-            log(line)
+    except:
+        # Emergency fallback - stay in place on error
         try:
             move(Direction.CENTER)
+            STATE.last_action = "hold"
         except:
             pass
-
